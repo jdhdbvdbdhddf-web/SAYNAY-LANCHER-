@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { api, ModEntry, ModReport, PackItem } from "../api";
 import { Button, NoInstance, Notice, PageHead, Panel } from "../components/ui";
 import { useApp } from "../hooks/AppContext";
@@ -47,12 +47,25 @@ export default function Mods() {
     );
   }
 
+  const loaderName = sel.loader === "fabric" ? "Fabric" : sel.loader === "forge" ? "Forge" : "Vanilla";
+  const canMod = sel.loader !== "vanilla" && sel.installed;
+
+  /** Shows exactly what would be installed and waits for a yes. Nothing is downloaded before that. */
+  const confirmThen = async (plan: ModReport[], run: () => Promise<ModReport[]>) => {
+    setReports(plan.filter((r) => r.status !== "planned"));
+    const planned = plan.filter((r) => r.status === "planned");
+    if (planned.length === 0) return;
+    const yes = await ask(`Install these into ${sel.name}?\n\n${planned.map((r) => `- ${r.detail}`).join("\n")}\n\nEach file is checked against its published hash first, and nothing is added if any check fails.`, { title: "Install mods", kind: "info" });
+    if (!yes) return;
+    setReports(await run());
+    await reload();
+  };
+
   const install = (s: string) =>
     act.run(async () => {
       setWorking(s);
       try {
-        setReports(await api.installMod(id, s));
-        await reload();
+        await confirmThen(await api.previewMod(id, s), () => api.installMod(id, s));
       } finally {
         setWorking(null);
       }
@@ -62,8 +75,7 @@ export default function Mods() {
     act.run(async () => {
       setWorking("profile");
       try {
-        setReports(await api.installProfileMods(id));
-        await reload();
+        await confirmThen(await api.previewProfileMods(id), () => api.installProfileMods(id));
       } finally {
         setWorking(null);
       }
@@ -78,12 +90,11 @@ export default function Mods() {
       }
     });
 
-  const isFabric = sel.loader === "fabric";
   const have = new Set(mods.map((m) => m.slug).filter(Boolean));
 
   return (
     <div className="page">
-      <PageHead title="Mods" text={`Managing ${sel.name}. Mods are only installed when they are published for Minecraft ${sel.mcVersion} on Fabric and match your Java and Fabric Loader versions.`} />
+      <PageHead title="Mods" text={`Managing ${sel.name} (${loaderName}). A mod is only offered when Modrinth lists Minecraft ${sel.mcVersion} for this loader and its hash matches. You always confirm before anything is installed.`} />
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
           <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
@@ -95,8 +106,9 @@ export default function Mods() {
 
       {tab === "mods" && (
         <>
-          {!isFabric && <Notice kind="warn">This is a Vanilla instance. Create a Fabric instance on the Versions page to use mods.</Notice>}
-          <Panel title="Optimization mods" aside={<Button variant="primary" small disabled={!isFabric || !sel.installed} busy={working === "profile"} onClick={installProfile}>Install all for this profile</Button>}>
+          {sel.loader === "vanilla" && <Notice kind="warn">This is a Vanilla instance. Install a Fabric or Forge version on the Versions page to use mods.</Notice>}
+          {sel.loader === "forge" && <Notice>Most optimization mods are Fabric-only. On Forge, SAYNAY reports exactly which ones have no compatible build for this version.</Notice>}
+          <Panel title="Optimization mods" aside={<Button variant="primary" small disabled={!canMod} busy={working === "profile"} onClick={installProfile}>Install all for this profile</Button>}>
             <table>
               <tbody>
                 {catalog.map(([s, name]) => (
@@ -104,7 +116,7 @@ export default function Mods() {
                     <td><b>{name}</b></td>
                     <td className="muted small">modrinth.com/mod/{s}</td>
                     <td style={{ textAlign: "right" }}>
-                      {have.has(s) ? <span className="badge good">Installed</span> : <Button small disabled={!isFabric || !sel.installed} busy={working === s} onClick={() => install(s)}>Check and install</Button>}
+                      {have.has(s) ? <span className="badge good">Installed</span> : <Button small disabled={!canMod} busy={working === s} onClick={() => install(s)}>Check and install</Button>}
                     </td>
                   </tr>
                 ))}
@@ -124,7 +136,7 @@ export default function Mods() {
           <Panel title="Install from Modrinth">
             <div className="row">
               <input type="text" style={{ maxWidth: 320 }} value={slug} placeholder="Project slug, for example fabric-api" onChange={(e) => setSlug(e.target.value)} />
-              <Button disabled={!isFabric || !sel.installed || !slug.trim()} busy={working === slug.trim().toLowerCase()} onClick={() => install(slug)}>Check and install</Button>
+              <Button disabled={!canMod || !slug.trim()} busy={working === slug.trim().toLowerCase()} onClick={() => install(slug)}>Check and install</Button>
             </div>
           </Panel>
 
@@ -133,11 +145,14 @@ export default function Mods() {
             <table>
               <tbody>
                 {mods.map((m) => (
-                  <tr key={m.file}>
+                  <tr key={m.file} style={{ opacity: m.enabled ? 1 : 0.55 }}>
                     <td><b>{m.title}</b> <span className="muted small">{m.version}</span></td>
-                    <td className="muted small">{m.managed ? "Installed by SAYNAY" : "Added manually"}</td>
+                    <td className="muted small">{m.managed ? "Installed by SAYNAY" : "Added manually"}{m.enabled ? "" : ", disabled"}</td>
                     <td style={{ textAlign: "right" }}>
-                      <Button small variant="danger" onClick={() => act.run(async () => { await api.removeMod(id, m.file); await reload(); })}>Remove</Button>
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <Button small onClick={() => act.run(async () => { await api.setModEnabled(id, m.file, !m.enabled); await reload(); })}>{m.enabled ? "Disable" : "Enable"}</Button>
+                        <Button small variant="danger" onClick={() => act.run(async () => { if (await ask(`Remove ${m.title}?`, { title: "Remove mod", kind: "warning" })) { await api.removeMod(id, m.file); await reload(); } })}>Remove</Button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -149,7 +164,7 @@ export default function Mods() {
 
       {tab !== "mods" && (
         <Panel title={tab === "resourcepacks" ? "Resource packs" : "Shader packs"} aside={<Button variant="primary" small onClick={importPack}>Import .zip</Button>}>
-          {tab === "shaderpacks" && <p className="muted small">Shader packs need a shader mod such as Iris. SAYNAY does not install one automatically because it conflicts with some setups.</p>}
+          {tab === "shaderpacks" && <p className="muted small">Shader packs need a shader mod such as Iris. SAYNAY manages the pack files but does not install a shader mod for you.</p>}
           {packs.length === 0 && <p className="muted">Nothing here yet.</p>}
           <table>
             <tbody>

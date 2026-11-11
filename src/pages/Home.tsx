@@ -44,7 +44,7 @@ export default function Home() {
     run(async () => {
       if (!sel || !sel.installed) return c.go("versions");
       if (running) return api.stop(sel.id);
-      if (!c.account) return c.go("play");
+      if (!c.account) return c.go("accounts");
       await api.launch(sel.id);
     });
 
@@ -67,7 +67,7 @@ export default function Home() {
             </div>
             <div>
               <small>Account</small>
-              <b>{c.account ? c.account.name : "Not signed in"}</b>
+              <b>{c.account ? `${c.account.name}${c.account.kind === "offline" ? " (offline test)" : ""}` : "No account"}</b>
             </div>
           </div>
         </div>

@@ -1,6 +1,7 @@
 //! Mod manager. Uses the public Modrinth API and only installs a mod when
-//! (1) Modrinth lists the exact Minecraft version + Fabric loader, (2) the file hash matches, and
-//! (3) the jar's own fabric.mod.json does not demand a newer Java or Fabric Loader than the instance has.
+//! (1) Modrinth lists the exact Minecraft version and the instance's loader (Fabric or Forge), (2) the file hash matches, and
+//! (3) for Fabric, the jar's own fabric.mod.json does not demand a newer Java or Fabric Loader than the instance has.
+//! Installs are always previewed first; the UI asks the user to confirm before anything is downloaded.
 
 pub mod packs;
 
@@ -14,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error::*, minecraft::Instance};
+use crate::{error::*, minecraft::Instance, net};
 
 pub const PERF_MODS: &[(&str, &str)] = &[
     ("sodium", "Sodium"),
@@ -45,6 +46,7 @@ pub struct ModEntry {
     pub version: String,
     pub slug: Option<String>,
     pub managed: bool,
+    pub enabled: bool,
     pub size_kb: u64,
 }
 
@@ -77,19 +79,25 @@ pub fn safe_name(n: &str) -> bool {
     !n.is_empty() && !n.contains(['/', '\\']) && n != "." && n != ".." && !n.contains("..")
 }
 
+fn base_name(file: &str) -> &str {
+    file.strip_suffix(".disabled").unwrap_or(file)
+}
+
 pub fn list(i: &Instance) -> Vec<ModEntry> {
     let managed = load(i);
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(mods_dir(i)) {
         for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
+            let raw = e.file_name().to_string_lossy().into_owned();
+            let name = base_name(&raw).to_string();
             if !name.ends_with(".jar") {
                 continue;
             }
+            let enabled = raw == name;
             let size_kb = e.metadata().map(|m| m.len() / 1024).unwrap_or(0);
             match managed.iter().find(|m| m.file == name) {
-                Some(m) => out.push(ModEntry { file: name, title: m.title.clone(), version: m.version.clone(), slug: Some(m.slug.clone()), managed: true, size_kb }),
-                None => out.push(ModEntry { title: name.trim_end_matches(".jar").to_string(), file: name, version: String::new(), slug: None, managed: false, size_kb }),
+                Some(m) => out.push(ModEntry { file: name, title: m.title.clone(), version: m.version.clone(), slug: Some(m.slug.clone()), managed: true, enabled, size_kb }),
+                None => out.push(ModEntry { title: name.trim_end_matches(".jar").to_string(), file: name, version: String::new(), slug: None, managed: false, enabled, size_kb }),
             }
         }
     }
@@ -97,16 +105,34 @@ pub fn list(i: &Instance) -> Vec<ModEntry> {
     out
 }
 
-pub fn remove(i: &Instance, file: &str) -> Result<()> {
-    if !safe_name(file) || !file.ends_with(".jar") {
+/// Disabling renames `x.jar` to `x.jar.disabled`, which the game ignores. Nothing is deleted.
+pub fn set_enabled(i: &Instance, file: &str, enabled: bool) -> Result<()> {
+    let base = base_name(file);
+    if !safe_name(base) || !base.ends_with(".jar") {
         return fail("Invalid mod file name");
     }
-    let p = mods_dir(i).join(file);
-    if p.is_file() {
-        std::fs::remove_file(p)?;
+    let on = mods_dir(i).join(base);
+    let off = mods_dir(i).join(format!("{base}.disabled"));
+    if enabled && off.is_file() {
+        std::fs::rename(off, on)?;
+    } else if !enabled && on.is_file() {
+        std::fs::rename(on, off)?;
+    }
+    Ok(())
+}
+
+pub fn remove(i: &Instance, file: &str) -> Result<()> {
+    let base = base_name(file);
+    if !safe_name(base) || !base.ends_with(".jar") {
+        return fail("Invalid mod file name");
+    }
+    for p in [mods_dir(i).join(base), mods_dir(i).join(format!("{base}.disabled"))] {
+        if p.is_file() {
+            std::fs::remove_file(p)?;
+        }
     }
     let mut m = load(i);
-    m.retain(|x| x.file != file);
+    m.retain(|x| x.file != base);
     save(i, &m)
 }
 
@@ -201,22 +227,26 @@ struct Plan {
     explicit: bool,
 }
 
-async fn get_json(http: &reqwest::Client, url: &str, q: &[(&str, String)]) -> Result<Value> {
-    Ok(http.get(url).query(q).send().await?.error_for_status()?.json().await?)
+async fn api(http: &reqwest::Client, path: &str, params: &[(&str, String)]) -> Result<Value> {
+    let url = reqwest::Url::parse_with_params(&format!("https://api.modrinth.com/v2/{path}"), params).map_err(|e| AppError::Msg(e.to_string()))?;
+    net::get_json(http, url.as_str()).await
 }
 
 async fn resolve(http: &reqwest::Client, inst: &Instance, project: &str, explicit: bool, manifest: &[InstalledMod]) -> std::result::Result<(Option<Plan>, Vec<String>, String), String> {
-    let p = get_json(http, &format!("https://api.modrinth.com/v2/project/{project}"), &[]).await.map_err(|_| format!("project \"{project}\" was not found on Modrinth"))?;
+    if !project.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        return Err("invalid project name".into());
+    }
+    let p = api(http, &format!("project/{project}"), &[]).await.map_err(|e| format!("project \"{project}\" could not be loaded from Modrinth ({e})"))?;
     let pid = p["id"].as_str().unwrap_or(project).to_string();
     let slug = p["slug"].as_str().unwrap_or(project).to_string();
     let title = p["title"].as_str().unwrap_or(&slug).to_string();
     if manifest.iter().any(|m| m.project_id == pid) {
         return Ok((None, vec![], slug));
     }
-    let versions = get_json(
+    let versions = api(
         http,
-        &format!("https://api.modrinth.com/v2/project/{pid}/version"),
-        &[("game_versions", format!("[\"{}\"]", inst.mc_version)), ("loaders", "[\"fabric\"]".into())],
+        &format!("project/{pid}/version"),
+        &[("game_versions", format!("[\"{}\"]", inst.mc_version)), ("loaders", format!("[\"{}\"]", inst.loader))],
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -226,7 +256,7 @@ async fn resolve(http: &reqwest::Client, inst: &Instance, project: &str, explici
         .iter()
         .find(|v| v["version_type"] == "release")
         .or_else(|| list.iter().find(|v| v["version_type"] == "beta"))
-        .ok_or_else(|| format!("{title} has no release for Minecraft {} on Fabric", inst.mc_version))?;
+        .ok_or_else(|| format!("{title} has no release for Minecraft {} on {}", inst.mc_version, inst.loader))?;
     let files = pick["files"].as_array().ok_or("version has no files")?;
     let file = files.iter().find(|f| f["primary"] == true).or(files.first()).ok_or("version has no files")?;
     let filename = file["filename"].as_str().unwrap_or("").to_string();
@@ -253,17 +283,17 @@ async fn resolve(http: &reqwest::Client, inst: &Instance, project: &str, explici
     ))
 }
 
-/// Installs a project and its required dependencies, or installs nothing and explains why.
-pub async fn install(http: &reqwest::Client, inst: &Instance, project: &str, java_major: u32) -> Result<Vec<ModReport>> {
-    if inst.loader != "fabric" {
-        return fail("Mods need a Fabric instance. Create one on the Versions page.");
+/// Works out exactly what would be installed (the mod plus required dependencies) without downloading anything.
+/// If any piece is incompatible, nothing is planned and the reason is reported.
+async fn plan_all(http: &reqwest::Client, inst: &Instance, project: &str) -> Result<(Vec<Plan>, Vec<ModReport>)> {
+    if !matches!(inst.loader.as_str(), "fabric" | "forge") {
+        return fail("Mods need a Fabric or Forge instance. Create one on the Versions page.");
     }
     let manifest = load(inst);
     let mut plans: Vec<Plan> = Vec::new();
     let mut reports: Vec<ModReport> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, bool)> = VecDeque::from([(project.to_string(), true)]);
-
     while let Some((proj, explicit)) = queue.pop_front() {
         if !seen.insert(proj.clone()) {
             continue;
@@ -278,12 +308,27 @@ pub async fn install(http: &reqwest::Client, inst: &Instance, project: &str, jav
             Ok((None, _, slug)) => reports.push(ModReport { slug, status: "already".into(), detail: "Already installed".into() }),
             Err(e) => {
                 let who = if explicit { project.to_string() } else { format!("{project} (needs {proj})") };
-                return Ok(vec![ModReport { slug: who, status: "incompatible".into(), detail: format!("Nothing was installed: {e}") }]);
+                return Ok((vec![], vec![ModReport { slug: who, status: "incompatible".into(), detail: format!("Nothing will be installed: {e}") }]));
             }
         }
     }
+    Ok((plans, reports))
+}
 
-    // Download everything to temp files and verify before touching the mods folder.
+pub async fn preview(http: &reqwest::Client, inst: &Instance, project: &str) -> Result<Vec<ModReport>> {
+    let (plans, mut reports) = plan_all(http, inst, project).await?;
+    for p in &plans {
+        reports.push(ModReport { slug: p.slug.clone(), status: "planned".into(), detail: format!("{} {}{}", p.title, p.version, if p.explicit { "" } else { " (required dependency)" }) });
+    }
+    Ok(reports)
+}
+
+/// Downloads every file to a temp name, verifies it, and only then moves anything into the mods folder.
+pub async fn install(http: &reqwest::Client, inst: &Instance, project: &str, java_major: u32) -> Result<Vec<ModReport>> {
+    let (plans, mut reports) = plan_all(http, inst, project).await?;
+    if plans.is_empty() {
+        return Ok(reports);
+    }
     let dir = mods_dir(inst);
     std::fs::create_dir_all(&dir)?;
     let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -301,13 +346,15 @@ pub async fn install(http: &reqwest::Client, inst: &Instance, project: &str, jav
         let tmp = dir.join(format!("{}.saynay-tmp", plan.filename));
         std::fs::write(&tmp, &bytes)?;
         temps.push((tmp.clone(), dir.join(&plan.filename)));
-        if let Err(why) = check_requirements(&tmp, inst.loader_version.as_deref(), java_major) {
-            cleanup(&temps);
-            return Ok(vec![ModReport { slug: plan.slug.clone(), status: "incompatible".into(), detail: format!("Nothing was installed: {why}.") }]);
+        if inst.loader == "fabric" {
+            if let Err(why) = check_requirements(&tmp, inst.loader_version.as_deref(), java_major) {
+                cleanup(&temps);
+                return Ok(vec![ModReport { slug: plan.slug.clone(), status: "incompatible".into(), detail: format!("Nothing was installed: {why}.") }]);
+            }
         }
     }
 
-    let mut manifest = manifest;
+    let mut manifest = load(inst);
     for (plan, (tmp, dest)) in plans.iter().zip(temps.iter()) {
         std::fs::rename(tmp, dest)?;
         manifest.push(InstalledMod {
@@ -322,6 +369,7 @@ pub async fn install(http: &reqwest::Client, inst: &Instance, project: &str, jav
         reports.push(ModReport { slug: plan.slug.clone(), status: "installed".into(), detail: format!("{} {}", plan.title, plan.version) });
     }
     save(inst, &manifest)?;
+    crate::logger::info(&format!("Installed {} mod file(s) into {}", plans.len(), inst.name));
     Ok(reports)
 }
 

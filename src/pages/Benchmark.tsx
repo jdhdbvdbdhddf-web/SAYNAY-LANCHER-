@@ -111,6 +111,8 @@ export default function Benchmark() {
                 rows={[
                   { label: "Average FPS", before: before.avgFps, after: after.avgFps, unit: "FPS", higherBetter: true },
                   { label: "1% low FPS", before: before.low1Fps, after: after.low1Fps, unit: "FPS", higherBetter: true },
+                  { label: "Lowest FPS (slowest frame)", before: before.minFps, after: after.minFps, unit: "FPS", higherBetter: true },
+                  { label: "Highest FPS (fastest frame)", before: before.maxFps, after: after.maxFps, unit: "FPS", higherBetter: true },
                   { label: "Frame-time spread", before: before.frameMsStddev, after: after.frameMsStddev, unit: "ms", higherBetter: false, digits: 2 },
                   { label: "Average RAM", before: before.ramAvgMb, after: after.ramAvgMb, unit: "MB", higherBetter: false, digits: 0 },
                   { label: "Peak RAM", before: before.ramPeakMb, after: after.ramPeakMb, unit: "MB", higherBetter: false, digits: 0 },
@@ -126,6 +128,12 @@ export default function Benchmark() {
                 ]}
               />
               <p className="muted small">Lower and flatter lines mean smoother gameplay. Spikes are stutters. Frame-time spread is the standard deviation of every recorded frame.</p>
+              {[before, after].map((r) => (
+                <p key={r.id} className="muted small selectable">
+                  Test machine for “{r.label}”: {r.hardware ? `${r.hardware.cpuName ?? "CPU unavailable"}, ${r.hardware.gpus.join(", ") || "GPU unavailable"}, ${fmtMb(r.hardware.ramTotalMb)} RAM, ${r.hardware.os} ${r.hardware.osVersion ?? ""}` : "not recorded"}
+                  {r.javaVersion ? `, ${r.javaVersion}` : ""}.
+                </p>
+              ))}
               {[...before.notes, ...after.notes].map((n, i) => <Notice key={i} kind="warn">{n}</Notice>)}
             </>
           )}

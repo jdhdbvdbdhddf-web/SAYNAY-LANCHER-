@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Page = "home" | "play" | "versions" | "mods" | "performance" | "benchmark" | "settings" | "about";
+export type Page = "home" | "play" | "versions" | "accounts" | "java" | "mods" | "performance" | "benchmark" | "settings" | "about";
 
 export interface Hardware {
   cpuName: string | null;
@@ -36,7 +36,7 @@ export interface Instance {
   id: string;
   name: string;
   mcVersion: string;
-  loader: "vanilla" | "fabric";
+  loader: "vanilla" | "fabric" | "forge";
   loaderVersion: string | null;
   versionId: string;
   installed: boolean;
@@ -47,13 +47,18 @@ export interface Instance {
   createdAt: number;
 }
 export interface ManifestVersion { id: string; kind: string; releaseTime: string }
+export interface VersionList { versions: ManifestVersion[]; fromCache: boolean; fetchedAt: number; warning: string | null; installed: string[] }
+export interface LoaderChoice { version: string; stable: boolean; recommended: boolean }
+export interface ForgeChoice { version: string; label: string; recommended: boolean; latest: boolean }
+export interface SourceRow { key: string; value: string; default: string }
 export interface JavaInstall { path: string; version: string; major: number; managed: boolean }
 export interface ProfileInfo { id: string; name: string; description: string; settings: GameSettings; ramTargetMb: number; mods: string[] }
 export interface Recommendation { profileId: string; reasons: string[]; ramMb: number }
-export interface Account { name: string; uuid: string }
+export interface Account { id: string; kind: "microsoft" | "offline"; name: string; uuid: string; createdAt: number }
+export interface AccountList { accounts: Account[]; active: string | null }
 export interface DeviceCodeInfo { userCode: string; verificationUri: string; expiresIn: number }
-export interface ModEntry { file: string; title: string; version: string; slug: string | null; managed: boolean; sizeKb: number }
-export interface ModReport { slug: string; status: "installed" | "already" | "incompatible" | "error"; detail: string }
+export interface ModEntry { file: string; title: string; version: string; slug: string | null; managed: boolean; enabled: boolean; sizeKb: number }
+export interface ModReport { slug: string; status: "planned" | "installed" | "already" | "incompatible" | "error"; detail: string }
 export interface PackItem { name: string; sizeKb: number; isDir: boolean }
 export interface InstallProgress { instanceId: string; stage: string; done: number; total: number }
 export interface ExitInfo { instanceId: string; code: number | null; stopped: boolean; crashReport: string | null; logFile: string | null; error: string | null }
@@ -69,6 +74,8 @@ export interface BenchResult {
   durationS: number;
   avgFps: number | null;
   low1Fps: number | null;
+  minFps: number | null;
+  maxFps: number | null;
   frameMsStddev: number | null;
   frameCount: number;
   frameTimesMs: number[];
@@ -77,6 +84,8 @@ export interface BenchResult {
   cpuAvgPct: number | null;
   loadSecs: number | null;
   notes: string[];
+  hardware: Hardware | null;
+  javaVersion: string | null;
 }
 
 export const api = {
@@ -84,10 +93,13 @@ export const api = {
   usage: () => invoke<Usage>("get_usage"),
   paths: () => invoke<DataPaths>("get_paths"),
 
-  versions: () => invoke<ManifestVersion[]>("list_versions"),
+  versions: (refresh: boolean) => invoke<VersionList>("list_versions", { refresh }),
+  fabricLoaders: (mcVersion: string) => invoke<LoaderChoice[]>("fabric_loader_list", { mcVersion }),
+  forgeVersions: (mcVersion: string) => invoke<ForgeChoice[]>("forge_version_list", { mcVersion }),
+  removeVersion: (versionId: string) => invoke<void>("remove_version", { versionId }),
   instances: () => invoke<Instance[]>("list_instances"),
-  createInstance: (name: string, mcVersion: string, loader: string, gameDir?: string) =>
-    invoke<Instance>("create_instance", { name, mcVersion, loader, gameDir: gameDir || null }),
+  createInstance: (name: string, mcVersion: string, loader: string, loaderVersion: string | null, gameDir?: string) =>
+    invoke<Instance>("create_instance", { name, mcVersion, loader, loaderVersion, gameDir: gameDir || null }),
   deleteInstance: (instanceId: string, deleteFiles: boolean) => invoke<void>("delete_instance", { instanceId, deleteFiles }),
   installInstance: (instanceId: string) => invoke<Instance>("install_instance", { instanceId }),
   requiredJava: (instanceId: string) => invoke<number | null>("required_java", { instanceId }),
@@ -95,8 +107,10 @@ export const api = {
   installJava: (major: number) => invoke<JavaInstall>("install_java", { major }),
 
   loginStart: () => invoke<DeviceCodeInfo>("ms_login_start"),
-  account: () => invoke<Account | null>("ms_account"),
-  logout: () => invoke<void>("ms_logout"),
+  accounts: () => invoke<AccountList>("list_accounts"),
+  addOfflineAccount: (name: string) => invoke<Account>("add_offline_account", { name }),
+  setActiveAccount: (id: string) => invoke<void>("set_active_account", { id }),
+  removeAccount: (id: string) => invoke<void>("remove_account", { id }),
   launch: (instanceId: string) => invoke<void>("launch_game", { instanceId }),
   stop: (instanceId: string) => invoke<void>("stop_game", { instanceId }),
   running: () => invoke<string[]>("running_games"),
@@ -111,6 +125,9 @@ export const api = {
 
   perfMods: () => invoke<[string, string][]>("perf_mod_catalog"),
   mods: (instanceId: string) => invoke<ModEntry[]>("list_mods", { instanceId }),
+  previewMod: (instanceId: string, slug: string) => invoke<ModReport[]>("preview_mod_install", { instanceId, slug }),
+  previewProfileMods: (instanceId: string) => invoke<ModReport[]>("preview_profile_mods", { instanceId }),
+  setModEnabled: (instanceId: string, file: string, enabled: boolean) => invoke<void>("set_mod_enabled", { instanceId, file, enabled }),
   installMod: (instanceId: string, slug: string) => invoke<ModReport[]>("install_mod", { instanceId, slug }),
   installProfileMods: (instanceId: string) => invoke<ModReport[]>("install_profile_mods", { instanceId }),
   removeMod: (instanceId: string, file: string) => invoke<void>("remove_mod", { instanceId, file }),
@@ -125,4 +142,7 @@ export const api = {
   settings: () => invoke<Record<string, string>>("get_settings"),
   setSetting: (key: string, value: string) => invoke<void>("set_setting", { key, value }),
   checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  sources: () => invoke<SourceRow[]>("get_sources"),
+  setSource: (key: string, value: string) => invoke<void>("set_source", { key, value }),
+  logTail: () => invoke<string>("get_log_tail"),
 };

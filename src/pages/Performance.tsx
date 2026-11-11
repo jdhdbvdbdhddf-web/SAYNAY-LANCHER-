@@ -115,12 +115,12 @@ export default function Performance() {
       </div>
 
       <Panel title="Memory and Java">
-        <Field label={`Memory for Minecraft: ${fmtMb(draft.ramMb)}`}>
+        <Field label={`Memory for Minecraft: ${fmtMb(draft.ramMb)}`} hint="How much memory the game may use. More is not always faster: too much slows garbage collection and can make the PC swap.">
           <input type="range" min={1024} max={maxRam} step={256} value={Math.min(draft.ramMb, maxRam)} onChange={(e) => set("ramMb", Number(e.target.value))} />
         </Field>
         {aboveHalf && <Notice kind="warn">More than half of your memory can make Windows or Linux swap and lower FPS. SAYNAY recommends staying at or below {fmtMb((hw?.ramTotalMb ?? 0) / 2)}.</Notice>}
         <div className="grid two">
-          <Field label="Java runtime">
+          <Field label="Java runtime" hint="Automatic picks the Java that fits this Minecraft version. Manage runtimes on the Java page.">
             <select value={javaPath} onChange={(e) => { setJavaPath(e.target.value); setSaved(false); }}>
               <option value="">Automatic (recommended)</option>
               {javas.map((j) => (
@@ -138,7 +138,7 @@ export default function Performance() {
             </div>
           </Field>
         </div>
-        <Field label="Custom JVM arguments (leave empty to use SAYNAY's recommended flags)">
+        <Field label="Custom JVM arguments (leave empty to use SAYNAY's recommended flags)" hint="Advanced. Wrong flags can stop the game from starting. Recommended flags pick a garbage collector that suits your core count.">
           <textarea value={draft.customJvmArgs} placeholder={preview.slice(1).join(" ")} onChange={(e) => set("customJvmArgs", e.target.value)} />
         </Field>
         <p className="muted small selectable">Active flags: {preview.join(" ")}</p>
@@ -146,40 +146,40 @@ export default function Performance() {
 
       <Panel title="Game settings">
         <div className="grid two">
-          <Field label={`Render distance: ${draft.renderDistance} chunks`}>
+          <Field label={`Render distance: ${draft.renderDistance} chunks`} hint="How many chunks around you are drawn. The biggest single effect on FPS.">
             <input type="range" min={2} max={32} value={draft.renderDistance} onChange={(e) => set("renderDistance", Number(e.target.value))} />
           </Field>
-          <Field label={`Simulation distance: ${draft.simulationDistance} chunks`}>
+          <Field label={`Simulation distance: ${draft.simulationDistance} chunks`} hint="How far from you the game runs mobs, crops and redstone. Lower saves CPU.">
             <input type="range" min={5} max={32} value={draft.simulationDistance} onChange={(e) => set("simulationDistance", Number(e.target.value))} />
           </Field>
-          <Field label={`Entity distance: ${draft.entityDistance.toFixed(2)}x`}>
+          <Field label={`Entity distance: ${draft.entityDistance.toFixed(2)}x`} hint="How far away mobs and items are still drawn. Lower helps in busy areas.">
             <input type="range" min={0.5} max={5} step={0.25} value={draft.entityDistance} onChange={(e) => set("entityDistance", Number(e.target.value))} />
           </Field>
-          <Field label={`Maximum FPS: ${draft.maxFps >= 260 ? "Unlimited" : draft.maxFps}`}>
+          <Field label={`Maximum FPS: ${draft.maxFps >= 260 ? "Unlimited" : draft.maxFps}`} hint="Caps the frame rate. A lower cap saves power and heat and can reduce stutter on weaker PCs.">
             <input type="range" min={30} max={260} step={10} value={draft.maxFps} onChange={(e) => set("maxFps", Number(e.target.value))} />
           </Field>
-          <Field label="Graphics quality">
+          <Field label="Graphics quality" hint="Fast skips effects such as leaf transparency. Fabulous costs the most GPU.">
             <select value={draft.graphics} onChange={(e) => set("graphics", e.target.value as GameSettings["graphics"])}>
               <option value="fast">Fast</option>
               <option value="fancy">Fancy</option>
               <option value="fabulous">Fabulous</option>
             </select>
           </Field>
-          <Field label="Particles">
+          <Field label="Particles" hint="Fewer particles means less work during fights, explosions and weather.">
             <select value={draft.particles} onChange={(e) => set("particles", e.target.value as GameSettings["particles"])}>
               <option value="all">All</option>
               <option value="decreased">Decreased</option>
               <option value="minimal">Minimal</option>
             </select>
           </Field>
-          <Field label="Clouds">
+          <Field label="Clouds" hint="Off is the cheapest. Fancy draws volumetric clouds.">
             <select value={draft.clouds} onChange={(e) => set("clouds", e.target.value as GameSettings["clouds"])}>
               <option value="off">Off</option>
               <option value="fast">Fast</option>
               <option value="fancy">Fancy</option>
             </select>
           </Field>
-          <Field label="Window size">
+          <Field label="Window size" hint="Smaller windows render fewer pixels, which raises FPS on weak GPUs.">
             <div className="row">
               <input type="number" style={{ width: 110 }} value={draft.width} min={320} onChange={(e) => set("width", Number(e.target.value))} />
               <span>by</span>
@@ -187,6 +187,7 @@ export default function Performance() {
             </div>
           </Field>
         </div>
+        <p className="hint">VSync matches frames to your monitor: no tearing, but it can lower FPS and add input delay. Fullscreen can reduce desktop compositing overhead.</p>
         <div className="row">
           <label className="check"><input type="checkbox" checked={draft.vsync} onChange={(e) => set("vsync", e.target.checked)} /> VSync</label>
           <label className="check"><input type="checkbox" checked={draft.fullscreen} onChange={(e) => set("fullscreen", e.target.checked)} /> Fullscreen</label>

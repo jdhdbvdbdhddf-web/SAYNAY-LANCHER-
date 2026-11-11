@@ -165,7 +165,7 @@ pub async fn ensure(app: &AppHandle, http: &reqwest::Client, major: u32) -> Resu
     if let Some(j) = pick(major, &have) {
         return Ok(j);
     }
-    install(app, http, major).await
+    install_managed(app, http, major).await
 }
 
 fn extract(bytes: &[u8], is_zip: bool, dest: &Path) -> Result<()> {
@@ -177,6 +177,16 @@ fn extract(bytes: &[u8], is_zip: bool, dest: &Path) -> Result<()> {
         tar::Archive::new(gz).unpack(dest)?;
     }
     Ok(())
+}
+
+/// Reuses a managed runtime that is already on disk instead of downloading it again.
+pub async fn install_managed(app: &AppHandle, http: &reqwest::Client, major: u32) -> Result<JavaInstall> {
+    if let Some(bin) = find_java_bin(&paths::runtimes().join(format!("java-{major}")), 5) {
+        if let Some(j) = probe(&bin) {
+            return Ok(j);
+        }
+    }
+    install(app, http, major).await
 }
 
 /// Download a Temurin JRE from the Adoptium API and verify its SHA-256 before extracting.

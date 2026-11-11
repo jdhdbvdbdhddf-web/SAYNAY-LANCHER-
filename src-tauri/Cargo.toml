@@ -23,6 +23,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures = "0.3"
 sha1 = "0.10"
 sha2 = "0.10"
+md-5 = "0.10"
 hex = "0.4"
 sysinfo = "0.33"
 rusqlite = { version = "0.32", features = ["bundled"] }

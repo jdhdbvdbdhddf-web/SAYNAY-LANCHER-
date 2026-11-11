@@ -1,9 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
 use crate::{paths, system};
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageInfo {
     pub mount: String,
@@ -13,7 +13,7 @@ pub struct StorageInfo {
 
 /// Everything here is read from the OS. Anything that cannot be read is `None` / empty,
 /// and the UI shows it as "unavailable" instead of guessing.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct HardwareInfo {
     pub cpu_name: Option<String>,

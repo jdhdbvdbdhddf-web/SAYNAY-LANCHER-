@@ -44,11 +44,12 @@ export function Meter({ value, max, label }: { value: number; max: number; label
   );
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="field">
       <span>{label}</span>
       {children}
+      {hint && <span className="hint">{hint}</span>}
     </label>
   );
 }

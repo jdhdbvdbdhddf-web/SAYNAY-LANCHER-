@@ -2,6 +2,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::{collections::HashMap, sync::Mutex};
 
 use crate::{
+    authentication::Account,
     benchmark::BenchResult,
     error::*,
     minecraft::Instance,
@@ -21,6 +22,7 @@ impl Db {
              PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS instances(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY, data TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS benchmarks(id INTEGER PRIMARY KEY AUTOINCREMENT, instance_id TEXT NOT NULL, data TEXT NOT NULL);",
         )?;
         Ok(Db(Mutex::new(c)))
@@ -51,6 +53,33 @@ impl Db {
             m.insert(k, v);
         }
         Ok(m)
+    }
+
+    // ---- accounts (tokens are never stored here; Microsoft refresh tokens live in the OS keychain) ----
+    pub fn list_accounts(&self) -> Result<Vec<Account>> {
+        let c = self.0.lock().unwrap();
+        let mut st = c.prepare("SELECT data FROM accounts")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut v = Vec::new();
+        for r in rows {
+            v.push(serde_json::from_str::<Account>(&r?)?);
+        }
+        v.sort_by_key(|a| a.created_at);
+        Ok(v)
+    }
+
+    pub fn save_account(&self, a: &Account) -> Result<()> {
+        let c = self.0.lock().unwrap();
+        c.execute(
+            "INSERT INTO accounts(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+            [&a.id, &serde_json::to_string(a)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_account(&self, id: &str) -> Result<()> {
+        self.0.lock().unwrap().execute("DELETE FROM accounts WHERE id=?1", [id])?;
+        Ok(())
     }
 
     // ---- instances ----

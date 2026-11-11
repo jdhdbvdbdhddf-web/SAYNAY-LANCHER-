@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -17,6 +17,7 @@ pub struct AppState {
     pub sys: Mutex<sysinfo::System>,
     pub hw: Mutex<Option<HardwareInfo>>,
     pub games: Mutex<HashMap<String, RunningGame>>,
+    pub installing: Mutex<HashSet<String>>,
     pub session: tokio::sync::Mutex<Option<McSession>>,
 }
 
@@ -34,6 +35,7 @@ impl AppState {
             sys: Mutex::new(sysinfo::System::new()),
             hw: Mutex::new(None),
             games: Mutex::new(HashMap::new()),
+            installing: Mutex::new(HashSet::new()),
             session: tokio::sync::Mutex::new(None),
         })
     }

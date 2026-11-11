@@ -35,14 +35,7 @@ pub async fn check(http: &reqwest::Client, repo: &str) -> Result<UpdateInfo> {
     if !ok {
         return fail("Set the update repository in Settings as owner/name, for example my-org/saynay-launcher.");
     }
-    let v: serde_json::Value = http
-        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let v = crate::net::get_json(http, &format!("https://api.github.com/repos/{repo}/releases/latest")).await?;
     let latest = v["tag_name"].as_str().unwrap_or("").trim_start_matches('v').to_string();
     let current = env!("CARGO_PKG_VERSION").to_string();
     Ok(UpdateInfo {

@@ -8,6 +8,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::{
     error::*,
+    hardware::HardwareInfo,
     minecraft::{launch, Instance},
     paths,
     state::AppState,
@@ -27,6 +28,11 @@ pub struct BenchResult {
     pub duration_s: u32,
     pub avg_fps: Option<f64>,
     pub low1_fps: Option<f64>,
+    /// Lowest and highest instantaneous FPS seen (from the slowest and fastest single frame).
+    #[serde(default)]
+    pub min_fps: Option<f64>,
+    #[serde(default)]
+    pub max_fps: Option<f64>,
     pub frame_ms_stddev: Option<f64>,
     pub frame_count: usize,
     /// Downsampled (bucket-averaged) for charting only; statistics use every frame.
@@ -36,6 +42,11 @@ pub struct BenchResult {
     pub cpu_avg_pct: Option<f64>,
     pub load_secs: Option<f64>,
     pub notes: Vec<String>,
+    /// What the test machine was, recorded with every result.
+    #[serde(default)]
+    pub hardware: Option<HardwareInfo>,
+    #[serde(default)]
+    pub java_version: Option<String>,
 }
 
 /// (average FPS, 1% low FPS, frame-time standard deviation in ms)
@@ -51,6 +62,12 @@ pub fn frame_stats(frames: &[f32]) -> Option<(f64, f64, f64)> {
     let worst = sorted[..k].iter().map(|&x| x as f64).sum::<f64>() / k as f64;
     let var = frames.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
     Some((1000.0 / mean, 1000.0 / worst, var.sqrt()))
+}
+
+pub fn frame_extremes(frames: &[f32]) -> Option<(f64, f64)> {
+    let min = frames.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = frames.iter().cloned().fold(0.0_f32, f32::max);
+    (frames.len() >= 30 && min > 0.0 && max > 0.0).then(|| (1000.0 / max as f64, 1000.0 / min as f64))
 }
 
 /// CSV: optional header `# start_ms=<unix ms>;end_ms=<unix ms>`, then one frame time (ms) per line.
@@ -134,6 +151,7 @@ pub async fn run(app: &AppHandle, inst: &Instance, label: String, seconds: u32) 
             return Err(e);
         }
     };
+    let java_version = prepared.java_version.clone();
     let finished = process::run(app, prepared, true).await;
     if injected {
         let _ = std::fs::remove_file(&mod_target);
@@ -142,6 +160,7 @@ pub async fn run(app: &AppHandle, inst: &Instance, label: String, seconds: u32) 
 
     let (frames, window) = std::fs::read_to_string(&csv).map(|t| parse_csv(&t)).unwrap_or((vec![], None));
     let stats = frame_stats(&frames);
+    let extremes = frame_extremes(&frames);
     if stats.is_none() && injected {
         notes.push("No frame data was recorded. Join a world and leave the game running until it closes itself.".into());
     }
@@ -182,6 +201,8 @@ pub async fn run(app: &AppHandle, inst: &Instance, label: String, seconds: u32) 
         duration_s: seconds,
         avg_fps: stats.map(|s| s.0),
         low1_fps: stats.map(|s| s.1),
+        min_fps: extremes.map(|e| e.0),
+        max_fps: extremes.map(|e| e.1),
         frame_ms_stddev: stats.map(|s| s.2),
         frame_count: frames.len(),
         frame_times_ms: downsample(&frames, 400),
@@ -190,6 +211,8 @@ pub async fn run(app: &AppHandle, inst: &Instance, label: String, seconds: u32) 
         cpu_avg_pct: cpu_avg,
         load_secs: fin.load_secs,
         notes,
+        hardware: Some(state.hardware()),
+        java_version,
     };
     r.id = state.db.add_benchmark(&r)?;
     Ok(r)
@@ -208,6 +231,15 @@ mod tests {
         assert!((avg - 1000.0 / 10.4).abs() < 0.01);
         // worst 1% = the single 50 ms frame
         assert!((low1 - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn extremes() {
+        let mut f = vec![10.0_f32; 40];
+        f[3] = 50.0;
+        f[9] = 5.0;
+        let (min, max) = frame_extremes(&f).unwrap();
+        assert!((min - 20.0).abs() < 1e-6 && (max - 200.0).abs() < 1e-6);
     }
 
     #[test]

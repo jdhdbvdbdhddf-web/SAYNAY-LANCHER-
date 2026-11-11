@@ -70,14 +70,15 @@ pub fn build(inst: &Instance, sess: &McSession, jvm_flags: &[String], extra: &[S
     vars.insert("auth_session", sess.access_token.clone());
     vars.insert("clientid", String::new());
     vars.insert("auth_xuid", String::new());
-    vars.insert("user_type", "msa".into());
+    vars.insert("user_type", if sess.kind == "offline" { "legacy".into() } else { "msa".into() });
     vars.insert("user_properties", "{}".into());
     vars.insert("version_name", inst.version_id.clone());
     vars.insert("version_type", r.v.kind.clone().unwrap_or_else(|| "release".into()));
     vars.insert("game_directory", inst.game_dir.clone());
     vars.insert("assets_root", assets_root.to_string_lossy().into_owned());
-    vars.insert("game_assets", assets_root.join("virtual").join("legacy").to_string_lossy().into_owned());
-    vars.insert("assets_index_name", r.v.asset_index.as_ref().map(|a| a.id.clone()).unwrap_or_default());
+    let index_id = r.v.asset_index.as_ref().map(|a| a.id.clone()).unwrap_or_default();
+    vars.insert("game_assets", assets_root.join("virtual").join(&index_id).to_string_lossy().into_owned());
+    vars.insert("assets_index_name", index_id);
     vars.insert("natives_directory", natives.to_string_lossy().into_owned());
     vars.insert("library_directory", paths::libraries().to_string_lossy().into_owned());
     vars.insert("classpath_separator", if cfg!(windows) { ";".into() } else { ":".into() });
@@ -152,6 +153,10 @@ pub async fn prepare(app: &AppHandle, inst: &Instance, extra: Vec<String>) -> Re
         None => PathBuf::from(java::ensure(app, &state.http, major).await?.path),
     };
 
+    let java_version = {
+        let jp = java_path.clone();
+        tokio::task::spawn_blocking(move || java::probe(&jp).map(|j| format!("Java {} ({})", j.major, j.version))).await.ok().flatten()
+    };
     let threads = state.hardware().threads;
     let flags: Vec<String> = if inst.settings.custom_jvm_args.trim().is_empty() {
         performance::jvm_flags(&inst.profile, major, threads)
@@ -160,5 +165,5 @@ pub async fn prepare(app: &AppHandle, inst: &Instance, extra: Vec<String>) -> Re
     };
     let args = build(inst, &session, &flags, &extra)?;
     std::fs::create_dir_all(inst.game_path())?;
-    Ok(PreparedLaunch { instance_id: inst.id.clone(), java: java_path, args, game_dir: inst.game_path() })
+    Ok(PreparedLaunch { instance_id: inst.id.clone(), java: java_path, args, game_dir: inst.game_path(), java_version })
 }

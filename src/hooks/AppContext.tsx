@@ -10,8 +10,10 @@ interface Ctx {
   selected: Instance | null;
   select: (id: string) => void;
   refresh: () => Promise<void>;
+  /** The active account, or null when none has been added. */
   account: Account | null;
-  setAccount: (a: Account | null) => void;
+  accounts: Account[];
+  refreshAccounts: () => Promise<void>;
   running: Set<string>;
   logsOf: (id: string) => string[];
   exits: Record<string, ExitInfo>;
@@ -31,7 +33,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [hw, setHw] = useState<Hardware | null>(null);
   const [instances, setInstances] = useState<Instance[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(() => localStorage.getItem("saynay.selected"));
-  const [account, setAccount] = useState<Account | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [running, setRunning] = useState<Set<string>>(new Set());
   const [exits, setExits] = useState<Record<string, ExitInfo>>({});
   const [progress, setProgress] = useState<InstallProgress | null>(null);
@@ -45,6 +48,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSelectedId((cur) => (cur && list.some((i) => i.id === cur) ? cur : list[0]?.id ?? null));
   }, []);
 
+  const refreshAccounts = useCallback(async () => {
+    const r = await api.accounts();
+    setAccounts(r.accounts);
+    setActiveId(r.active);
+  }, []);
+
   const select = useCallback((id: string) => {
     localStorage.setItem("saynay.selected", id);
     setSelectedId(id);
@@ -53,9 +62,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     api.hardware().then(setHw).catch(() => setHw(null));
     refresh().catch(() => undefined);
-    api.account().then(setAccount).catch(() => undefined);
+    refreshAccounts().catch(() => undefined);
+    api.versions(false).catch(() => undefined); // warms the version list cache at startup
     api.running().then((r) => setRunning(new Set(r))).catch(() => undefined);
-  }, [refresh]);
+  }, [refresh, refreshAccounts]);
 
   // One set of global listeners. Log lines are batched so a chatty game cannot flood React.
   useEffect(() => {
@@ -89,7 +99,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setExits((x) => ({ ...x, [e.payload.instanceId]: e.payload }));
       }),
       listen<InstallProgress>("install-progress", (e) => setProgress(e.payload)),
-      listen<Account>("auth-complete", (e) => setAccount(e.payload)),
+      listen<Account>("auth-complete", () => {
+        api.accounts().then((r) => { setAccounts(r.accounts); setActiveId(r.active); }).catch(() => undefined);
+      }),
     ];
     return () => {
       subs.forEach((p) => p.then((off) => off()));
@@ -99,6 +111,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const selected = useMemo(() => instances.find((i) => i.id === selectedId) ?? null, [instances, selectedId]);
   const logsOf = useCallback((id: string) => logs.current[id] ?? [], []);
 
-  const value: Ctx = { page, go, hw, instances, selected, select, refresh, account, setAccount, running, logsOf, exits, progress };
+  const account = accounts.find((a) => a.id === activeId) ?? null;
+  const value: Ctx = { page, go, hw, instances, selected, select, refresh, account, accounts, refreshAccounts, running, logsOf, exits, progress };
   return <C.Provider value={value}>{children}</C.Provider>;
 }

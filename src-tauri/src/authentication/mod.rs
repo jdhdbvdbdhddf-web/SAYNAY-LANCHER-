@@ -1,24 +1,38 @@
-//! Official Microsoft sign-in: OAuth device-code flow -> Xbox Live -> XSTS -> Minecraft Services.
-//! SAYNAY never sees a password. The refresh token lives in the OS keychain; access tokens stay in memory
-//! and are never sent to the UI.
+//! Accounts. Microsoft: official device-code flow -> Xbox Live -> XSTS -> Minecraft Services.
+//! SAYNAY never sees a password. Refresh tokens live in the OS keychain (one entry per account),
+//! access tokens stay in memory and are never sent to the UI or written to logs.
+//! Offline: a local test account with no credentials, clearly labelled and unable to join online-mode servers.
 
+use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
-use crate::{db::Db, error::*, state::AppState};
+use crate::{db::Db, error::*, logger, state::AppState};
 
 const SCOPE: &str = "XboxLive.signin offline_access";
 const MS: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const KEY_SERVICE: &str = "saynay-launcher";
-const KEY_USER: &str = "microsoft-refresh-token";
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    /// The player UUID (no dashes). Unique per account.
+    pub id: String,
+    /// "microsoft" or "offline"
+    pub kind: String,
+    pub name: String,
+    pub uuid: String,
+    pub created_at: i64,
+}
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct McSession {
     pub name: String,
     pub uuid: String,
+    pub kind: String,
     #[serde(skip)]
     pub access_token: String,
     #[serde(skip)]
@@ -64,17 +78,17 @@ pub fn client_id(db: &Db) -> Result<String> {
 
 // ---------- keychain ----------
 
-fn entry() -> Result<keyring::Entry> {
-    keyring::Entry::new(KEY_SERVICE, KEY_USER).map_err(|e| AppError::Msg(format!("keychain unavailable: {e}")))
+fn entry(uuid: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new(KEY_SERVICE, &format!("microsoft-refresh-{uuid}")).map_err(|e| AppError::Msg(format!("keychain unavailable: {e}")))
 }
-pub fn store_refresh(token: &str) -> Result<()> {
-    entry()?.set_password(token).map_err(|e| AppError::Msg(format!("could not save login to the keychain: {e}")))
+pub fn store_refresh(uuid: &str, token: &str) -> Result<()> {
+    entry(uuid)?.set_password(token).map_err(|e| AppError::Msg(format!("could not save login to the keychain: {e}")))
 }
-pub fn load_refresh() -> Option<String> {
-    entry().ok()?.get_password().ok()
+pub fn load_refresh(uuid: &str) -> Option<String> {
+    entry(uuid).ok()?.get_password().ok()
 }
-pub fn clear_refresh() {
-    if let Ok(e) = entry() {
+pub fn clear_refresh(uuid: &str) {
+    if let Ok(e) = entry(uuid) {
         let _ = e.delete_credential();
     }
 }
@@ -152,7 +166,7 @@ async fn poll_token(http: &reqwest::Client, cid: &str, dc: &DeviceCode) -> Resul
     }
 }
 
-async fn refresh_token(http: &reqwest::Client, cid: &str, refresh: &str) -> Result<TokenSet> {
+async fn refresh_token(http: &reqwest::Client, cid: &str, uuid: &str, refresh: &str) -> Result<TokenSet> {
     let r: Value = http
         .post(format!("{MS}/token"))
         .form(&[("grant_type", "refresh_token"), ("client_id", cid), ("refresh_token", refresh), ("scope", SCOPE)])
@@ -163,7 +177,8 @@ async fn refresh_token(http: &reqwest::Client, cid: &str, refresh: &str) -> Resu
     match r["access_token"].as_str() {
         Some(t) => Ok(TokenSet { access: t.into(), refresh: r["refresh_token"].as_str().unwrap_or("").into() }),
         None => {
-            clear_refresh();
+            clear_refresh(uuid);
+            logger::info("Microsoft refresh token was rejected; the saved login was removed.");
             fail("Your Microsoft login expired. Sign in again.")
         }
     }
@@ -212,42 +227,127 @@ async fn xbox_chain(http: &reqwest::Client, ms_access: &str) -> Result<McSession
     Ok(McSession {
         name: prof["name"].as_str().ok_or("Profile has no name")?.to_string(),
         uuid: prof["id"].as_str().ok_or("Profile has no id")?.to_string(),
+        kind: "microsoft".into(),
         access_token: access,
         expires_at: now() + expires,
     })
 }
 
+// ---------- accounts ----------
+
+pub fn active_id(db: &Db) -> Option<String> {
+    db.get_setting("active_account").ok().flatten().filter(|s| !s.is_empty())
+}
+
+pub fn active_account(db: &Db) -> Result<Option<Account>> {
+    let id = active_id(db);
+    let all = db.list_accounts()?;
+    Ok(id.and_then(|i| all.into_iter().find(|a| a.id == i)))
+}
+
+pub fn set_active(db: &Db, id: &str) -> Result<()> {
+    if !db.list_accounts()?.iter().any(|a| a.id == id) {
+        return fail("That account does not exist.");
+    }
+    db.set_setting("active_account", id)
+}
+
+/// Java's UUID.nameUUIDFromBytes("OfflinePlayer:<name>"), the same id a vanilla offline-mode server derives.
+pub fn offline_uuid(name: &str) -> String {
+    let mut h: [u8; 16] = Md5::digest(format!("OfflinePlayer:{name}").as_bytes()).into();
+    h[6] = (h[6] & 0x0f) | 0x30;
+    h[8] = (h[8] & 0x3f) | 0x80;
+    hex::encode(h)
+}
+
+pub fn add_offline(db: &Db, name: &str) -> Result<Account> {
+    let name = name.trim();
+    if !(3..=16).contains(&name.len()) || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return fail("An offline username needs 3 to 16 letters, numbers or underscores.");
+    }
+    let uuid = offline_uuid(name);
+    if db.list_accounts()?.iter().any(|a| a.id == uuid) {
+        return fail("This offline account already exists.");
+    }
+    let a = Account { id: uuid.clone(), kind: "offline".into(), name: name.into(), uuid, created_at: now() };
+    db.save_account(&a)?;
+    if active_id(db).is_none() {
+        db.set_setting("active_account", &a.id)?;
+    }
+    logger::info(&format!("Added offline test account {name}"));
+    Ok(a)
+}
+
+pub async fn remove_account(app: &AppHandle, id: &str) -> Result<()> {
+    let state = app.state::<AppState>();
+    let all = state.db.list_accounts()?;
+    let Some(a) = all.iter().find(|a| a.id == id) else { return fail("That account does not exist.") };
+    if a.kind == "microsoft" {
+        clear_refresh(&a.uuid);
+    }
+    state.db.delete_account(id)?;
+    if active_id(&state.db).as_deref() == Some(id) {
+        let next = all.iter().find(|a| a.id != id).map(|a| a.id.clone()).unwrap_or_default();
+        state.db.set_setting("active_account", &next)?;
+    }
+    *state.session.lock().await = None;
+    logger::info(&format!("Removed account {}", a.name));
+    Ok(())
+}
+
 // ---------- public flow used by commands ----------
 
-pub async fn complete_device_login(app: &AppHandle, cid: &str, dc: &DeviceCode) -> Result<McSession> {
+pub async fn complete_device_login(app: &AppHandle, cid: &str, dc: &DeviceCode) -> Result<Account> {
     let state = app.state::<AppState>();
     let t = poll_token(&state.http, cid, dc).await?;
+    let s = xbox_chain(&state.http, &t.access).await?;
     if !t.refresh.is_empty() {
-        store_refresh(&t.refresh)?;
+        store_refresh(&s.uuid, &t.refresh)?;
+    }
+    let existing = state.db.list_accounts()?.into_iter().find(|a| a.id == s.uuid);
+    let acc = Account { id: s.uuid.clone(), kind: "microsoft".into(), name: s.name.clone(), uuid: s.uuid.clone(), created_at: existing.map(|a| a.created_at).unwrap_or_else(now) };
+    state.db.save_account(&acc)?;
+    state.db.set_setting("active_account", &acc.id)?;
+    *state.session.lock().await = Some(s);
+    logger::info(&format!("Signed in Microsoft account {}", acc.name));
+    Ok(acc)
+}
+
+/// A session for the active account. Offline accounts need no network. Microsoft accounts refresh silently.
+pub async fn ensure_session(app: &AppHandle) -> Result<McSession> {
+    let state = app.state::<AppState>();
+    let Some(acc) = active_account(&state.db)? else {
+        return fail("Add an account first: sign in with Microsoft, or add an offline test account.");
+    };
+    if acc.kind == "offline" {
+        return Ok(McSession { name: acc.name, uuid: acc.uuid, kind: "offline".into(), access_token: "0".into(), expires_at: i64::MAX });
+    }
+    {
+        let g = state.session.lock().await;
+        if let Some(s) = g.as_ref() {
+            if s.uuid == acc.uuid && s.expires_at > now() + 300 {
+                return Ok(s.clone());
+            }
+        }
+    }
+    let refresh = load_refresh(&acc.uuid).ok_or_else(|| AppError::Msg("This account's saved login is gone. Sign in with Microsoft again.".into()))?;
+    let cid = client_id(&state.db)?;
+    let t = refresh_token(&state.http, &cid, &acc.uuid, &refresh).await?;
+    if !t.refresh.is_empty() {
+        store_refresh(&acc.uuid, &t.refresh)?;
     }
     let s = xbox_chain(&state.http, &t.access).await?;
     *state.session.lock().await = Some(s.clone());
     Ok(s)
 }
 
-/// A valid Minecraft session, refreshed silently from the keychain when needed.
-pub async fn ensure_session(app: &AppHandle) -> Result<McSession> {
-    let state = app.state::<AppState>();
-    {
-        let g = state.session.lock().await;
-        if let Some(s) = g.as_ref() {
-            if s.expires_at > now() + 300 {
-                return Ok(s.clone());
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offline_uuid_matches_java() {
+        // UUID.nameUUIDFromBytes("OfflinePlayer:Notch") = b50ad385-829d-3141-a216-7e7d7539ba7f
+        assert_eq!(offline_uuid("Notch"), "b50ad385829d3141a2167e7d7539ba7f");
     }
-    let refresh = load_refresh().ok_or_else(|| AppError::Msg("Sign in with your Microsoft account first.".into()))?;
-    let cid = client_id(&state.db)?;
-    let t = refresh_token(&state.http, &cid, &refresh).await?;
-    if !t.refresh.is_empty() {
-        store_refresh(&t.refresh)?;
-    }
-    let s = xbox_chain(&state.http, &t.access).await?;
-    *state.session.lock().await = Some(s.clone());
-    Ok(s)
 }

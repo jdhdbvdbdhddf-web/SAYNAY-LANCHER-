@@ -5,10 +5,13 @@ mod db;
 mod error;
 mod hardware;
 mod java;
+mod logger;
 mod minecraft;
 mod mods;
+mod net;
 mod paths;
 mod performance;
+mod sources;
 mod state;
 mod system;
 
@@ -27,6 +30,9 @@ pub fn run() {
             commands::get_usage,
             commands::get_paths,
             commands::list_versions,
+            commands::fabric_loader_list,
+            commands::forge_version_list,
+            commands::remove_version,
             commands::list_instances,
             commands::create_instance,
             commands::delete_instance,
@@ -35,8 +41,10 @@ pub fn run() {
             commands::detect_javas,
             commands::install_java,
             commands::ms_login_start,
-            commands::ms_account,
-            commands::ms_logout,
+            commands::list_accounts,
+            commands::add_offline_account,
+            commands::set_active_account,
+            commands::remove_account,
             commands::launch_game,
             commands::stop_game,
             commands::running_games,
@@ -48,6 +56,9 @@ pub fn run() {
             commands::jvm_preview,
             commands::perf_mod_catalog,
             commands::list_mods,
+            commands::preview_mod_install,
+            commands::preview_profile_mods,
+            commands::set_mod_enabled,
             commands::install_mod,
             commands::install_profile_mods,
             commands::remove_mod,
@@ -59,7 +70,10 @@ pub fn run() {
             commands::delete_benchmark,
             commands::get_settings,
             commands::set_setting,
-            commands::check_update
+            commands::check_update,
+            commands::get_sources,
+            commands::set_source,
+            commands::get_log_tail
         ])
         .run(tauri::generate_context!())
         .expect("SAYNAY Launcher failed to start");

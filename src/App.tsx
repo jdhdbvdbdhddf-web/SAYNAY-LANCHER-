@@ -2,6 +2,8 @@ import { Page } from "./api";
 import { AppProvider, useApp } from "./hooks/AppContext";
 import Sidebar from "./layouts/Sidebar";
 import About from "./pages/About";
+import Accounts from "./pages/Accounts";
+import Java from "./pages/Java";
 import Benchmark from "./pages/Benchmark";
 import Home from "./pages/Home";
 import Mods from "./pages/Mods";
@@ -14,6 +16,8 @@ const VIEWS: Record<Page, () => JSX.Element> = {
   home: Home,
   play: Play,
   versions: Versions,
+  accounts: Accounts,
+  java: Java,
   mods: Mods,
   performance: Performance,
   benchmark: Benchmark,

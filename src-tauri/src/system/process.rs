@@ -25,6 +25,7 @@ pub struct PreparedLaunch {
     pub java: PathBuf,
     pub args: Vec<String>,
     pub game_dir: PathBuf,
+    pub java_version: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +69,7 @@ pub async fn run(app: &AppHandle, p: PreparedLaunch, sample: bool) -> Result<Fin
     {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
+    crate::logger::info(&format!("Launching {} with: {} {}", p.instance_id, p.java.display(), crate::logger::redact_args(&p.args)));
     let mut child = cmd.spawn().map_err(|e| AppError::Msg(format!("Could not start Java: {e}")))?;
     let pid = child.id().unwrap_or(0);
 

@@ -121,6 +121,9 @@ pub struct VersionJson {
     pub java_version: Option<JavaVersionReq>,
     #[serde(rename = "type", default)]
     pub kind: Option<String>,
+    /// Old Forge profiles name the vanilla jar to use instead of inheriting.
+    #[serde(default)]
+    pub jar: Option<String>,
 }
 
 pub struct Resolved {
@@ -216,6 +219,16 @@ pub fn maven_path(c: &Coord) -> String {
 
 // ---------- library planning ----------
 
+/// Old profiles still point at http:// and the retired files.minecraftforge.net maven path.
+pub fn normalize_url(u: &str) -> String {
+    let u = u.replace("http://files.minecraftforge.net/maven/", "https://maven.minecraftforge.net/").replace("https://files.minecraftforge.net/maven/", "https://maven.minecraftforge.net/");
+    if let Some(rest) = u.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else {
+        u
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LibFile {
     pub key: String,
@@ -268,7 +281,7 @@ pub fn plan_libraries(v: &VersionJson) -> Vec<LibFile> {
                             .unwrap_or_default()
                     });
                     push(
-                        LibFile { key: format!("{base_key}:{cls}"), path, url: a.url.clone(), sha1: a.sha1.clone(), on_classpath: false, extract_natives: true, exclude: exclude.clone() },
+                        LibFile { key: format!("{base_key}:{cls}"), path, url: normalize_url(&a.url), sha1: a.sha1.clone(), on_classpath: false, extract_natives: true, exclude: exclude.clone() },
                         &mut out,
                     );
                 }
@@ -285,14 +298,14 @@ pub fn plan_libraries(v: &VersionJson) -> Vec<LibFile> {
         if let Some(a) = lib.downloads.as_ref().and_then(|d| d.artifact.as_ref()) {
             let path = a.path.clone().or_else(|| coord.as_ref().map(maven_path)).unwrap_or_default();
             push(
-                LibFile { key, path, url: a.url.clone(), sha1: a.sha1.clone(), on_classpath: true, extract_natives: is_native_jar, exclude },
+                LibFile { key, path, url: normalize_url(&a.url), sha1: a.sha1.clone(), on_classpath: true, extract_natives: is_native_jar, exclude },
                 &mut out,
             );
         } else if lib.natives.is_none() {
             if let Some(c) = &coord {
                 let path = maven_path(c);
                 let base = lib.url.clone().unwrap_or_else(|| "https://libraries.minecraft.net/".into());
-                let url = format!("{}{}", if base.ends_with('/') { base } else { format!("{base}/") }, path);
+                let url = normalize_url(&format!("{}{}", if base.ends_with('/') { base } else { format!("{base}/") }, path));
                 push(LibFile { key, path, url, sha1: None, on_classpath: true, extract_natives: is_native_jar, exclude }, &mut out);
             }
         }
@@ -316,7 +329,8 @@ pub fn load(id: &str) -> Result<VersionJson> {
 pub fn resolve(id: &str) -> Result<Resolved> {
     let child = load(id)?;
     let Some(parent_id) = child.inherits_from.clone() else {
-        return Ok(Resolved { jar_id: id.to_string(), v: child });
+        let jar_id = child.jar.clone().filter(|j| !j.is_empty()).unwrap_or_else(|| id.to_string());
+        return Ok(Resolved { jar_id, v: child });
     };
     let parent = resolve(&parent_id)?;
     let mut m = parent.v;

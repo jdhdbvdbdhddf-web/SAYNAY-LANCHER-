@@ -6,6 +6,8 @@ const ITEMS: { id: Page; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "play", label: "Play" },
   { id: "versions", label: "Versions" },
+  { id: "accounts", label: "Accounts" },
+  { id: "java", label: "Java" },
   { id: "mods", label: "Mods" },
   { id: "performance", label: "Performance" },
   { id: "benchmark", label: "Benchmark" },
@@ -35,9 +37,9 @@ export default function Sidebar() {
       <div className="account-chip">
         <div className="name">
           <span className={`dot ${running.size ? "on" : ""}`} />
-          {account ? account.name : "Not signed in"}
+          {account ? account.name : "No account"}
         </div>
-        <div className="muted small">{running.size ? "Minecraft is running" : account ? "Ready to play" : "Sign in on the Play page"}</div>
+        <div className="muted small">{running.size ? "Minecraft is running" : account ? (account.kind === "offline" ? "Offline test account" : "Microsoft account") : "Add one on the Accounts page"}</div>
       </div>
     </aside>
   );

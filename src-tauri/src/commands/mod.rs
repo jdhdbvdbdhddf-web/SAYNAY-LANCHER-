@@ -7,17 +7,17 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::{
-    authentication::{self, McSession},
+    authentication::{self, Account},
     benchmark::{self, BenchResult},
     error::*,
     hardware::{self, HardwareInfo},
     java::{self, JavaInstall},
     minecraft::{
-        install::{self, ManifestVersion},
+        install::{self, ForgeChoice, LoaderChoice, VersionList},
         launch, version, GameSettings, Instance,
     },
     mods::{self, packs::{self, PackItem}, ModEntry, ModReport},
-    paths, performance,
+    logger, paths, performance, sources,
     state::AppState,
     system::{self, process, update::{self, UpdateInfo}, Usage},
 };
@@ -59,8 +59,39 @@ pub fn get_paths() -> DataPaths {
 // ---------- versions and instances ----------
 
 #[tauri::command]
-pub async fn list_versions(state: State<'_, AppState>) -> Result<Vec<ManifestVersion>> {
-    Ok(install::manifest(&state.http).await?.versions)
+pub async fn list_versions(state: State<'_, AppState>, refresh: bool) -> Result<VersionList> {
+    let src = sources::Sources::load(&state.db);
+    let (m, from_cache, fetched_at, warning) = install::manifest(&state.http, &src, refresh).await?;
+    Ok(VersionList { versions: m.versions, from_cache, fetched_at, warning, installed: install::installed_ids() })
+}
+
+#[tauri::command]
+pub async fn fabric_loader_list(state: State<'_, AppState>, mc_version: String) -> Result<Vec<LoaderChoice>> {
+    let src = sources::Sources::load(&state.db);
+    install::fabric_loaders(&state.http, &src, &mc_version).await
+}
+
+#[tauri::command]
+pub async fn forge_version_list(state: State<'_, AppState>, mc_version: String) -> Result<Vec<ForgeChoice>> {
+    let src = sources::Sources::load(&state.db);
+    install::forge_versions(&state.http, &src, &mc_version).await
+}
+
+/// Removes an installed version's own files. Shared libraries and assets stay, because other versions use them.
+#[tauri::command]
+pub fn remove_version(state: State<'_, AppState>, version_id: String) -> Result<()> {
+    if version_id.is_empty() || version_id.contains(['/', '\\']) || version_id.contains("..") {
+        return fail("Invalid version id");
+    }
+    if state.db.list_instances()?.iter().any(|i| i.version_id == version_id || i.mc_version == version_id) {
+        return fail("An instance still uses this version. Remove that instance first.");
+    }
+    let dir = paths::versions().join(&version_id);
+    if dir.is_dir() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    logger::info(&format!("Removed version {version_id}"));
+    Ok(())
 }
 
 #[tauri::command]
@@ -69,9 +100,30 @@ pub fn list_instances(state: State<'_, AppState>) -> Result<Vec<Instance>> {
 }
 
 #[tauri::command]
-pub fn create_instance(state: State<'_, AppState>, name: String, mc_version: String, loader: String, game_dir: Option<String>) -> Result<Instance> {
-    if !matches!(loader.as_str(), "vanilla" | "fabric") {
-        return fail("Unsupported loader");
+pub async fn create_instance(state: State<'_, AppState>, name: String, mc_version: String, loader: String, loader_version: Option<String>, game_dir: Option<String>) -> Result<Instance> {
+    let src = sources::Sources::load(&state.db);
+    let loader_version = loader_version.filter(|v| !v.trim().is_empty());
+    match loader.as_str() {
+        "vanilla" => {}
+        "fabric" => {
+            let list = install::fabric_loaders(&state.http, &src, &mc_version).await?;
+            if list.is_empty() {
+                return fail(format!("Fabric does not support Minecraft {mc_version}."));
+            }
+            if let Some(v) = &loader_version {
+                if !list.iter().any(|l| &l.version == v) {
+                    return fail("That Fabric Loader version is not compatible with this Minecraft version.");
+                }
+            }
+        }
+        "forge" => {
+            let list = install::forge_versions(&state.http, &src, &mc_version).await?;
+            let Some(v) = &loader_version else { return fail("Choose a Forge version.") };
+            if !list.iter().any(|l| &l.version == v) {
+                return fail("That Forge version is not compatible with this Minecraft version.");
+            }
+        }
+        _ => return fail("Unsupported loader"),
     }
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -98,7 +150,7 @@ pub fn create_instance(state: State<'_, AppState>, name: String, mc_version: Str
         version_id: mc_version.clone(),
         mc_version,
         loader,
-        loader_version: None,
+        loader_version,
         installed: false,
         game_dir: dir.to_string_lossy().into_owned(),
         java_path: None,
@@ -107,11 +159,10 @@ pub fn create_instance(state: State<'_, AppState>, name: String, mc_version: Str
         created_at: chrono::Utc::now().timestamp(),
     };
     state.db.save_instance(&inst)?;
+    logger::info(&format!("Created instance {} ({} {})", inst.name, inst.mc_version, inst.loader));
     Ok(inst)
 }
 
-/// Removes the instance. Files are only deleted for folders SAYNAY created itself, and worlds are
-/// moved to the backups folder first. Custom game folders are never deleted.
 #[tauri::command]
 pub fn delete_instance(state: State<'_, AppState>, instance_id: String, delete_files: bool) -> Result<()> {
     if state.games.lock().unwrap().contains_key(&instance_id) {
@@ -135,13 +186,25 @@ pub fn delete_instance(state: State<'_, AppState>, instance_id: String, delete_f
 
 #[tauri::command]
 pub async fn install_instance(app: AppHandle, state: State<'_, AppState>, instance_id: String) -> Result<Instance> {
-    let mut inst = state.db.get_instance(&instance_id)?;
-    install::install(&app, &state.http, &mut inst).await?;
-    let major = version::resolve(&inst.version_id)?.v.java_version.map(|j| j.major_version).unwrap_or(8);
-    java::ensure(&app, &state.http, major).await?;
-    inst.installed = true;
-    state.db.save_instance(&inst)?;
-    Ok(inst)
+    if !state.installing.lock().unwrap().insert(instance_id.clone()) {
+        return fail("This instance is already being installed.");
+    }
+    let result = async {
+        let src = sources::Sources::load(&state.db);
+        let mut inst = state.db.get_instance(&instance_id)?;
+        install::install(&app, &state.http, &src, &mut inst).await?;
+        let major = version::resolve(&inst.version_id)?.v.java_version.map(|j| j.major_version).unwrap_or(8);
+        java::ensure(&app, &state.http, major).await?;
+        inst.installed = true;
+        state.db.save_instance(&inst)?;
+        Ok::<Instance, AppError>(inst)
+    }
+    .await;
+    state.installing.lock().unwrap().remove(&instance_id);
+    if let Err(e) = &result {
+        logger::error(&format!("Install failed: {e}"));
+    }
+    result
 }
 
 #[tauri::command]
@@ -165,7 +228,7 @@ pub async fn install_java(app: AppHandle, state: State<'_, AppState>, major: u32
     if !(8..=40).contains(&major) {
         return fail("Unsupported Java version");
     }
-    java::install(&app, &state.http, major).await
+    java::install_managed(&app, &state.http, major).await
 }
 
 async fn java_major_for(state: &AppState, inst: &Instance) -> Result<u32> {
@@ -180,7 +243,7 @@ async fn java_major_for(state: &AppState, inst: &Instance) -> Result<u32> {
     Ok(java::pick(required, &java::detect_async().await?).map(|j| j.major).unwrap_or(required))
 }
 
-// ---------- account ----------
+// ---------- accounts ----------
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,10 +261,11 @@ pub async fn ms_login_start(app: AppHandle, state: State<'_, AppState>) -> Resul
     let app2 = app.clone();
     tokio::spawn(async move {
         match authentication::complete_device_login(&app2, &cid, &dc).await {
-            Ok(s) => {
-                let _ = app2.emit("auth-complete", &s);
+            Ok(a) => {
+                let _ = app2.emit("auth-complete", &a);
             }
             Err(e) => {
+                logger::error(&format!("Microsoft sign-in failed: {e}"));
                 let _ = app2.emit("auth-error", e.to_string());
             }
         }
@@ -209,23 +273,34 @@ pub async fn ms_login_start(app: AppHandle, state: State<'_, AppState>) -> Resul
     Ok(info)
 }
 
-/// Returns the signed-in account if there is a stored login. Never returns tokens.
-#[tauri::command]
-pub async fn ms_account(app: AppHandle) -> Result<Option<McSession>> {
-    if authentication::load_refresh().is_none() {
-        return Ok(None);
-    }
-    Ok(authentication::ensure_session(&app).await.ok())
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountList {
+    pub accounts: Vec<Account>,
+    pub active: Option<String>,
 }
 
 #[tauri::command]
-pub async fn ms_logout(state: State<'_, AppState>) -> Result<()> {
-    authentication::clear_refresh();
+pub fn list_accounts(state: State<'_, AppState>) -> Result<AccountList> {
+    Ok(AccountList { accounts: state.db.list_accounts()?, active: authentication::active_id(&state.db) })
+}
+
+#[tauri::command]
+pub fn add_offline_account(state: State<'_, AppState>, name: String) -> Result<Account> {
+    authentication::add_offline(&state.db, &name)
+}
+
+#[tauri::command]
+pub async fn set_active_account(state: State<'_, AppState>, id: String) -> Result<()> {
+    authentication::set_active(&state.db, &id)?;
     *state.session.lock().await = None;
     Ok(())
 }
 
-// ---------- launching ----------
+#[tauri::command]
+pub async fn remove_account(app: AppHandle, id: String) -> Result<()> {
+    authentication::remove_account(&app, &id).await
+}
 
 #[tauri::command]
 pub async fn launch_game(app: AppHandle, state: State<'_, AppState>, instance_id: String) -> Result<()> {
@@ -353,6 +428,28 @@ pub fn list_mods(state: State<'_, AppState>, instance_id: String) -> Result<Vec<
 }
 
 #[tauri::command]
+pub async fn preview_mod_install(state: State<'_, AppState>, instance_id: String, slug: String) -> Result<Vec<ModReport>> {
+    let inst = state.db.get_instance(&instance_id)?;
+    mods::preview(&state.http, &inst, &slug.trim().to_lowercase()).await
+}
+
+#[tauri::command]
+pub async fn preview_profile_mods(state: State<'_, AppState>, instance_id: String) -> Result<Vec<ModReport>> {
+    let inst = state.db.get_instance(&instance_id)?;
+    let def = performance::find(&inst.profile).ok_or("Unknown profile")?;
+    let mut all = Vec::new();
+    for slug in def.mods {
+        all.extend(mods::preview(&state.http, &inst, slug).await?);
+    }
+    Ok(all)
+}
+
+#[tauri::command]
+pub fn set_mod_enabled(state: State<'_, AppState>, instance_id: String, file: String, enabled: bool) -> Result<()> {
+    mods::set_enabled(&state.db.get_instance(&instance_id)?, &file, enabled)
+}
+
+#[tauri::command]
 pub async fn install_mod(state: State<'_, AppState>, instance_id: String, slug: String) -> Result<Vec<ModReport>> {
     let inst = state.db.get_instance(&instance_id)?;
     let slug = slug.trim().to_lowercase();
@@ -439,4 +536,30 @@ pub fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Re
 pub async fn check_update(state: State<'_, AppState>) -> Result<UpdateInfo> {
     let repo = state.db.get_setting("update_repo")?.unwrap_or_default();
     update::check(&state.http, &repo).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceRow {
+    pub key: String,
+    pub value: String,
+    pub default: String,
+}
+
+#[tauri::command]
+pub fn get_sources(state: State<'_, AppState>) -> Vec<SourceRow> {
+    sources::DEFAULTS
+        .iter()
+        .map(|(k, d)| SourceRow { key: k.to_string(), value: state.db.get_setting(k).ok().flatten().unwrap_or_default(), default: d.to_string() })
+        .collect()
+}
+
+#[tauri::command]
+pub fn set_source(state: State<'_, AppState>, key: String, value: String) -> Result<()> {
+    sources::set(&state.db, &key, &value)
+}
+
+#[tauri::command]
+pub fn get_log_tail() -> String {
+    logger::tail(250)
 }
